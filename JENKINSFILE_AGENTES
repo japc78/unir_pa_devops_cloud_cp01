@@ -1,0 +1,194 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('Inital') {
+            steps {
+                script {
+                    showEnvironmentInfo()
+                    deleteDir()
+                    if (isContainerRunning('wiremock')) {
+                        echo "El contenedor 'wiremock' está en ejecución. Deteniéndolo..."
+                        sh 'docker stop wiremock'
+                    } else {
+                        echo "El contenedor 'wiremock' no está en ejecución. No es necesario detenerlo."
+                    }
+                }
+            }
+        }
+
+        stage('Get Code') {
+            steps {
+                showEnvironmentInfo()
+                git 'https://github.com/japc78/unir_pa_devops_cloud_cp01.git'
+            }
+        }
+
+        stage('Build') {
+            steps {
+                showEnvironmentInfo()
+                echo 'Save stash'
+                stash name: 'built-artifacts'
+            }
+        }
+
+        stage('Start Services') {
+            parallel {
+                stage('Start WireMock') {
+                    agent { label 'build' }
+                    steps {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            showEnvironmentInfo()
+                            unstash 'built-artifacts'
+                            echo 'Listing mappings directory content:'
+                            sh 'ls -lah $WORKSPACE/test/wiremock/mappings'
+                            echo 'Running WireMock'
+                            sh '''
+                                docker run --rm --network host -d --name wiremock \
+                                --user root \
+                                -v $WORKSPACE/test/wiremock/mappings:/home/wiremock/mappings \
+                                wiremock/wiremock:latest \
+                                --port 9090 \
+                                --verbose \
+                            '''
+                        }
+                    }
+                }
+
+                stage('Start Rest API') {
+                    agent { label 'build' }
+                    steps {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            showEnvironmentInfo()
+                            unstash 'built-artifacts'
+                            sh '''
+                                export PYTHONPATH=$WORKSPACE
+                                export FLASK_APP=app/api.py
+                                flask run &
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Waiting Services') {
+            parallel {
+                stage('Waiting Wiremock') {
+                    agent { label 'build' }
+                    steps {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            showEnvironmentInfo()
+                            unstash 'built-artifacts'
+                            waitForServiceAvailability("http://localhost:9090/__admin/", "Wiremock")
+                        }
+                    }
+                }
+                stage('Waiting API REST') {
+                    agent { label 'build' }
+                    steps {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            showEnvironmentInfo()
+                            unstash 'built-artifacts'
+                            waitForServiceAvailability("http://localhost:5000/", "API Calc")
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Running Test') {
+            parallel {
+                stage('Unit Test') {
+                    agent { label 'test' }
+                    steps {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            unstash 'built-artifacts'
+                            showEnvironmentInfo()
+                            sh '''
+                                export PYTHONPATH=$WORKSPACE
+                                pytest --junitxml=result-unit.xml test/unit
+                            '''
+                            stash name: 'unit-test-results', includes: 'result-unit.xml'
+                        }
+                    }
+                }
+
+                stage('Rest Test') {
+                    steps {
+                        agent { label 'test' }
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            unstash 'built-artifacts'
+                            showEnvironmentInfo()
+                            sh '''
+                                export PYTHONPATH=$WORKSPACE
+                                echo "PYTHONPATH is set to: $PYTHONPATH"
+                                pytest --junitxml=result-rest.xml test/rest
+                            '''
+                            stash name: 'unit-rest-results', includes: 'result-rest.xml'
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Results') {
+            steps {
+                unstash 'unit-test-results'
+                unstash 'unit-rest-results'
+                showEnvironmentInfo()
+                junit('result*.xml')
+            }
+        }
+    }
+
+    post() {
+        always {
+            echo "Pipeline finalizado. Deteniendo y limpiando servicios..."
+            sh 'docker stop wiremock'
+            echo "Cleaning up workspace..."
+            deleteDir()
+        }
+    }
+}
+
+def waitForServiceAvailability(String url, String serviceName, int retries = 2, int delaySeconds = 3) {
+    for (int attempt = 1; attempt <= retries; attempt++) {
+        try {
+            def status = sh(script: "curl -s -o /dev/null -w '%{http_code}' ${url}", returnStdout: true).trim()
+            int responseCode = status.isInteger() ? status.toInteger() : 0
+
+            if (responseCode in 200..299) {
+                echo "${serviceName} is running (HTTP ${responseCode})."
+                return
+            } else {
+                echo "Attempt ${attempt}: ${serviceName} responded with code: ${responseCode}, retrying in ${delaySeconds} seconds..."
+            }
+        } catch (Exception e) {
+            echo "Attempt ${attempt}: Failed to connect to ${serviceName}, retrying in ${delaySeconds} seconds..."
+        }
+
+        if (attempt < retries) {
+            sleep delaySeconds
+        }
+    }
+    error "ERROR, PIPELINE FAIL | ${serviceName} did not respond after ${retries} attempts"
+}
+
+def showEnvironmentInfo() {
+    def envInfo = sh(script: '''
+        echo "Whoami: $(whoami)"
+        echo "Hostname: $(hostname)"
+        echo "WORKSPACE: ${WORKSPACE}"
+    ''', returnStdout: true).trim()
+
+    echo envInfo
+}
+
+def isContainerRunning(String containerName) {
+    def status = sh(
+        script: "docker ps --filter 'name=${containerName}' --filter 'status=running' -q",
+        returnStdout: true
+    ).trim()
+    return status != ''
+}
