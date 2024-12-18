@@ -13,6 +13,45 @@ pipeline {
             }
         }
 
+        stage('Start Wiremock') {
+            steps {
+                echo 'Running WireMock'
+                sh '''
+                    docker run --rm --network host -d --name wiremock \
+                    --user root \
+                    -v $WORKSPACE/test/wiremock/mappings:/home/wiremock/mappings \
+                    wiremock/wiremock:latest \
+                    --port 9090 \
+                    --verbose \
+                '''
+            }
+            post {
+                success {
+                    waitForServiceAvailability("http://localhost:9090/__admin/", "Wiremock")
+                    echo "WireMock arrancado correctamente."
+                }
+                failure { error "WireMock no pudo arrancar." }
+            }
+        }
+
+        stage('Start API') {
+            steps {
+                sh '''
+                    export PYTHONPATH=$WORKSPACE
+                    export FLASK_APP=app/api.py
+                    flask run &
+                '''
+            }
+            post {
+                success {
+                    waitForServiceAvailability("http://localhost:5000/", "API Calc")
+                    echo "API arrancada correctamente."
+                }
+                failure { error "API no pudo arrancar." }
+            }
+
+        }
+
         stage('Test ') {
             parallel {
                 stage('Test Unit') {
@@ -31,23 +70,8 @@ pipeline {
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                             sh '''
-                                docker run --rm --network host -d --name wiremock \
-                                --user root \
-                                -v $WORKSPACE/test/wiremock/mappings:/home/wiremock/mappings \
-                                wiremock/wiremock:latest \
-                                --port 9090 \
-
-                                sleep 3
-
                                 export PYTHONPATH=$WORKSPACE
-                                export FLASK_APP=app/api.py
-                                flask run &
-
-                                sleep 3
-
                                 pytest --junitxml=result-rest.xml test/rest
-
-                                docker stop wiremock
                             '''
                         }
                     }
@@ -61,4 +85,36 @@ pipeline {
             }
         }
     }
+
+    post() {
+        always {
+            echo "Pipeline finalizado. Deteniendo y limpiando servicios..."
+            sh 'docker stop wiremock'
+            echo "Cleaning up workspace..."
+            deleteDir()
+        }
+    }
+}
+
+def waitForServiceAvailability(String url, String serviceName, int retries = 5, int delaySeconds = 3) {
+    for (int attempt = 1; attempt <= retries; attempt++) {
+        try {
+            def status = sh(script: "curl -s -o /dev/null -w '%{http_code}' ${url}", returnStdout: true).trim()
+            int responseCode = status.isInteger() ? status.toInteger() : 0
+
+            if (responseCode in 200..299) {
+                echo "${serviceName} is running (HTTP ${responseCode})."
+                return
+            } else {
+                echo "Attempt ${attempt}: ${serviceName} responded with code: ${responseCode}, retrying in ${delaySeconds} seconds..."
+            }
+        } catch (Exception e) {
+            echo "Attempt ${attempt}: Failed to connect to ${serviceName}, retrying in ${delaySeconds} seconds..."
+        }
+
+        if (attempt < retries) {
+            sleep delaySeconds
+        }
+    }
+    error "ERROR, PIPELINE FAIL | ${serviceName} did not respond after ${retries} attempts"
 }
