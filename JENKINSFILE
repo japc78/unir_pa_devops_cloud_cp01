@@ -3,7 +3,7 @@ pipeline {
     stages {
         stage('Get Code') {
             steps {
-                git 'https://github.com/japc78/unir_pa_devops_cloud_cp01.git'
+                git branch: 'develop', url: 'https://github.com/japc78/unir_pa_devops_cloud_cp01.git'
             }
         }
 

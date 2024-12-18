@@ -20,7 +20,7 @@ pipeline {
         stage('Get Code') {
             steps {
                 showEnvironmentInfo()
-                git 'https://github.com/japc78/unir_pa_devops_cloud_cp01.git'
+                git branch: 'develop', url: 'https://github.com/japc78/unir_pa_devops_cloud_cp01.git'
             }
         }
 
@@ -152,7 +152,7 @@ pipeline {
     }
 }
 
-def waitForServiceAvailability(String url, String serviceName, int retries = 2, int delaySeconds = 3) {
+def waitForServiceAvailability(String url, String serviceName, int retries = 3, int delaySeconds = 5) {
     for (int attempt = 1; attempt <= retries; attempt++) {
         try {
             def status = sh(script: "curl -s -o /dev/null -w '%{http_code}' ${url}", returnStdout: true).trim()
