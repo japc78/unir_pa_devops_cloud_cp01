@@ -32,75 +32,10 @@ pipeline {
             }
         }
 
-        stage('Start Services') {
-            parallel {
-                stage('Start WireMock') {
-                    agent { label 'build' }
-                    steps {
-                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-                            showEnvironmentInfo()
-                            unstash 'built-artifacts'
-                            echo 'Listing mappings directory content:'
-                            sh 'ls -lah $WORKSPACE/test/wiremock/mappings'
-                            echo 'Running WireMock'
-                            sh '''
-                                docker run --rm --network host -d --name wiremock \
-                                --user root \
-                                -v $WORKSPACE/test/wiremock/mappings:/home/wiremock/mappings \
-                                wiremock/wiremock:latest \
-                                --port 9090 \
-                                --verbose \
-                            '''
-                        }
-                    }
-                }
-
-                stage('Start Rest API') {
-                    agent { label 'build' }
-                    steps {
-                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-                            showEnvironmentInfo()
-                            unstash 'built-artifacts'
-                            sh '''
-                                export PYTHONPATH=$WORKSPACE
-                                export FLASK_APP=app/api.py
-                                flask run &
-                            '''
-                        }
-                    }
-                }
-            }
-        }
-
-        stage('Waiting Services') {
-            parallel {
-                stage('Waiting Wiremock') {
-                    agent { label 'build' }
-                    steps {
-                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-                            showEnvironmentInfo()
-                            unstash 'built-artifacts'
-                            waitForServiceAvailability("http://localhost:9090/__admin/", "Wiremock")
-                        }
-                    }
-                }
-                stage('Waiting API REST') {
-                    agent { label 'build' }
-                    steps {
-                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-                            showEnvironmentInfo()
-                            unstash 'built-artifacts'
-                            waitForServiceAvailability("http://localhost:5000/", "API Calc")
-                        }
-                    }
-                }
-            }
-        }
-
         stage('Running Test') {
             parallel {
                 stage('Unit Test') {
-                    agent { label 'test' }
+                    agent { label 'worker1' }
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                             unstash 'built-artifacts'
@@ -110,22 +45,45 @@ pipeline {
                                 pytest --junitxml=result-unit.xml test/unit
                             '''
                             stash name: 'unit-test-results', includes: 'result-unit.xml'
+                            deleteDir()
                         }
                     }
                 }
 
                 stage('Rest Test') {
                     steps {
-                        agent { label 'test' }
+                        agent { label 'worker2' }
                         catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                             unstash 'built-artifacts'
                             showEnvironmentInfo()
+                            echo 'Starting WireMock'
+                            sh '''
+                                docker run --rm --network host -d --name wiremock \
+                                --user root \
+                                -v $WORKSPACE/test/wiremock/mappings:/home/wiremock/mappings \
+                                wiremock/wiremock:latest \
+                                --port 9090 \
+                                --verbose \
+                            '''
+                            waitForServiceAvailability("http://localhost:9090/__admin/", "Wiremock")
+
+                            echo 'Starting Flask'
+                            sh '''
+                                export PYTHONPATH=$WORKSPACE
+                                export FLASK_APP=app/api.py
+                                flask run &
+                            '''
+                            waitForServiceAvailability("http://localhost:5000/", "API Calc")
+
                             sh '''
                                 export PYTHONPATH=$WORKSPACE
                                 echo "PYTHONPATH is set to: $PYTHONPATH"
                                 pytest --junitxml=result-rest.xml test/rest
                             '''
                             stash name: 'unit-rest-results', includes: 'result-rest.xml'
+
+                            sh 'docker stop wiremock'
+                            deleteDir()
                         }
                     }
                 }
@@ -144,8 +102,6 @@ pipeline {
 
     post() {
         always {
-            echo "Pipeline finalizado. Deteniendo y limpiando servicios..."
-            sh 'docker stop wiremock'
             echo "Cleaning up workspace..."
             deleteDir()
         }
