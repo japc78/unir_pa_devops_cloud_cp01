@@ -18,44 +18,41 @@ pipeline {
         }
 
         stage('Get Code') {
+            agent { label 'main' }
             steps {
                 showEnvironmentInfo()
                 git 'https://github.com/japc78/unir_pa_devops_cloud_cp01.git'
-            }
-        }
-
-        stage('Build') {
-            steps {
-                showEnvironmentInfo()
                 echo 'Save stash'
                 stash name: 'built-artifacts'
             }
         }
 
-        stage('Running Test') {
+        stage('Test') {
             parallel {
                 stage('Unit Test') {
                     agent { label 'worker1' }
                     steps {
-                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-                            unstash 'built-artifacts'
+                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
                             showEnvironmentInfo()
+                            unstash 'built-artifacts'
                             sh '''
                                 export PYTHONPATH=$WORKSPACE
-                                pytest --junitxml=result-unit.xml test/unit
+                                coverage run  --branch --source=app --omit=app/__init__.py,app/api.py -m pytest --junitxml=result-unit.xml test/unit
+                                coverage xml
                             '''
                             stash name: 'unit-test-results', includes: 'result-unit.xml'
+                            stash name: 'coverage-results', includes: 'coverage.xml'
                             deleteDir()
                         }
                     }
                 }
 
                 stage('Rest Test') {
+                    agent { label 'worker2' }
                     steps {
-                        agent { label 'worker2' }
-                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-                            unstash 'built-artifacts'
+                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
                             showEnvironmentInfo()
+                            unstash 'built-artifacts'
                             echo 'Starting WireMock'
                             sh '''
                                 docker run --rm --network host -d --name wiremock \
@@ -64,15 +61,12 @@ pipeline {
                                 wiremock/wiremock:latest \
                                 --port 9090 \
                                 --verbose \
-                            '''
-                            waitForServiceAvailability("http://localhost:9090/__admin/", "Wiremock")
 
-                            echo 'Starting Flask'
-                            sh '''
                                 export PYTHONPATH=$WORKSPACE
                                 export FLASK_APP=app/api.py
                                 flask run &
                             '''
+                            waitForServiceAvailability("http://localhost:9090/__admin/", "Wiremock")
                             waitForServiceAvailability("http://localhost:5000/", "API Calc")
 
                             sh '''
@@ -81,8 +75,85 @@ pipeline {
                                 pytest --junitxml=result-rest.xml test/rest
                             '''
                             stash name: 'unit-rest-results', includes: 'result-rest.xml'
-
                             sh 'docker stop wiremock'
+                        }
+                    }
+                }
+            }
+
+            post() {
+                success {
+                    showEnvironmentInfo()
+                    unstash  'unit-test-results'
+                    unstash 'unit-rest-results'
+                    junit('result*.xml')
+                }
+
+                always {
+                    echo "Cleaning up workspace..."
+                    deleteDir()
+                }
+            }
+        }
+
+        stage('Code Analysis') {
+            parallel {
+                stage('Coverage') {
+                    agent { label 'worker1' }
+                    steps {
+                        echo 'Starting Coverage'
+                        showEnvironmentInfo()
+                        unstash 'coverage-results'
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            cobertura coberturaReportFile: 'coverage.xml', conditionalCoverageTargets: '90, 0, 80', lineCoverageTargets: '95, 0, 85'
+                        }
+                    }
+
+                    post() {
+                        always {
+                            echo "Cleaning up workspace..."
+                            deleteDir()
+                        }
+                    }
+                }
+
+                stage('Static') {
+                    agent { label 'worker2' }
+                    steps {
+                        echo 'Starting flake8'
+                        showEnvironmentInfo()
+                        unstash 'built-artifacts'
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            sh '''
+                                flake8 --format=pylint --exit-zero app  > flake8.out
+                            '''
+                            recordIssues tools: [flake8(name: 'Flake8', pattern: 'flake8.out')], qualityGates: [[threshold:8, type: 'TOTAL', unstable: true], [threshold: 10, type: 'TOTAL', unstable: false]]
+                        }
+                    }
+                    post() {
+                        always {
+                            echo "Cleaning up workspace..."
+                            deleteDir()
+                        }
+                    }
+                }
+
+                stage('Security') {
+                    agent any
+                    steps {
+                        echo 'Starting Bandit'
+                        showEnvironmentInfo()
+                        unstash 'built-artifacts'
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            sh '''
+                                bandit --exit-zero -r . -f custom -o bandit.out --msg-template '{abspath}:{line}: [{test_id}] {msg}'
+                            '''
+                            recordIssues tools: [pyLint(name: 'Bandit', pattern: 'bandit.out')], qualityGates: [[threshold:2, type: 'TOTAL', unstable: true], [threshold: 4, type: 'TOTAL', unstable: false]]
+                        }
+                    }
+                    post() {
+                        always {
+                            echo "Cleaning up workspace..."
                             deleteDir()
                         }
                     }
@@ -90,12 +161,32 @@ pipeline {
             }
         }
 
-        stage('Results') {
+        stage('Performarce') {
+            agent { label 'worker1' }
             steps {
-                unstash 'unit-test-results'
-                unstash 'unit-rest-results'
-                showEnvironmentInfo()
-                junit('result*.xml')
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    unstash 'built-artifacts'
+                    showEnvironmentInfo()
+                    echo 'Starting Flask'
+                    sh '''
+                        export PYTHONPATH=$WORKSPACE
+                        export FLASK_APP=app/api.py
+                        flask run &
+                    '''
+                    waitForServiceAvailability("http://localhost:5000/", "API Calc")
+
+                    echo 'Jmeter'
+                    sh '''
+                        jmeter -n -t ./test/jmeter/flask.jmx -f -l flask.jtl
+                    '''
+                    perfReport sourceDataFiles: 'flask.jtl'
+                }
+            }
+            post() {
+                always {
+                    echo "Cleaning up workspace..."
+                    deleteDir()
+                }
             }
         }
     }
@@ -108,7 +199,7 @@ pipeline {
     }
 }
 
-def waitForServiceAvailability(String url, String serviceName, int retries = 2, int delaySeconds = 3) {
+def waitForServiceAvailability(String url, String serviceName, int retries = 3, int delaySeconds = 5) {
     for (int attempt = 1; attempt <= retries; attempt++) {
         try {
             def status = sh(script: "curl -s -o /dev/null -w '%{http_code}' ${url}", returnStdout: true).trim()
@@ -139,6 +230,7 @@ def showEnvironmentInfo() {
     ''', returnStdout: true).trim()
 
     echo envInfo
+    getNodeAndExecutorDetails()
 }
 
 def isContainerRunning(String containerName) {
@@ -147,4 +239,18 @@ def isContainerRunning(String containerName) {
         returnStdout: true
     ).trim()
     return status != ''
+}
+
+def getNodeAndExecutorDetails() {
+    def nodeName = env.NODE_NAME ?: 'main'
+    def executorNumber = env.EXECUTOR_NUMBER
+    def buildUrl = env.BUILD_URL
+    def buildNumber = env.BUILD_NUMBER
+
+    echo "### Node and Executor Details ###"
+    echo "Node Name: ${nodeName}"
+    echo "Executor Number: ${executorNumber}"
+    echo "Build Number: ${buildNumber}"
+    echo "Build URL: ${buildUrl}"
+    echo "###############################"
 }
