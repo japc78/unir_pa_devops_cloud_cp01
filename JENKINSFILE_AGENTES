@@ -105,7 +105,9 @@ pipeline {
                         showEnvironmentInfo()
                         unstash 'coverage-results'
                         catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-                            cobertura coberturaReportFile: 'coverage.xml', conditionalCoverageTargets: '90, 0, 80', lineCoverageTargets: '95, 0, 85'
+                            // cobertura coberturaReportFile: 'coverage.xml', conditionalCoverageTargets: '90, 0, 80', lineCoverageTargets: '95, 0, 85'
+
+                            recordCoverage qualityGates: [[criticality: 'NOTE', integerThreshold: 95, metric: 'LINE', threshold: 95.0], [criticality: 'ERROR', integerThreshold: 80, metric: 'LINE', threshold: 80.0], [criticality: 'NOTE', integerThreshold: 90, metric: 'BRANCH', threshold: 90.0], [criticality: 'ERROR', integerThreshold: 80, metric: 'BRANCH', threshold: 80.0]], tools: [[parser: 'COBERTURA', pattern: 'coverage.xml']]
                         }
                     }
 
