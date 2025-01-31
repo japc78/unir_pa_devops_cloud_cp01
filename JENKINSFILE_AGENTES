@@ -21,7 +21,7 @@ pipeline {
             agent { label 'main' }
             steps {
                 showEnvironmentInfo()
-                git 'https://github.com/japc78/unir_pa_devops_cloud_cp01.git'
+                git branch: 'feature_fix_coverage', url: 'https://github.com/japc78/unir_pa_devops_cloud_cp01.git'
                 echo 'Save stash'
                 stash name: 'built-artifacts'
             }
@@ -105,7 +105,9 @@ pipeline {
                         showEnvironmentInfo()
                         unstash 'coverage-results'
                         catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-                            cobertura coberturaReportFile: 'coverage.xml', conditionalCoverageTargets: '90, 0, 80', lineCoverageTargets: '95, 0, 85'
+                            // cobertura coberturaReportFile: 'coverage.xml', conditionalCoverageTargets: '90, 0, 80', lineCoverageTargets: '95, 0, 85'
+
+                            recordCoverage qualityGates: [[criticality: 'NOTE', integerThreshold: 95, metric: 'LINE', threshold: 95.0], [criticality: 'ERROR', integerThreshold: 80, metric: 'LINE', threshold: 80.0], [criticality: 'NOTE', integerThreshold: 90, metric: 'BRANCH', threshold: 90.0], [criticality: 'ERROR', integerThreshold: 80, metric: 'BRANCH', threshold: 80.0]], tools: [[parser: 'COBERTURA', pattern: 'coverage.xml']]
                         }
                     }
 
