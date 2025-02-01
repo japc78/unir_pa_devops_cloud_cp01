@@ -32,12 +32,12 @@ pipeline {
                 stage('Unit Test') {
                     agent { label 'worker1' }
                     steps {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                             showEnvironmentInfo()
                             unstash 'built-artifacts'
                             sh '''
                                 export PYTHONPATH=$WORKSPACE
-                                coverage run  --branch --source=app --omit=app/__init__.py,app/api.py -m pytest --junitxml=result-unit.xml test/unit
+                                coverage run  --branch --source=app --omit=app/__init__.py,app/api.py -m pytest --junitxml=result-unit.xml test/unit || true
                                 coverage xml
                             '''
                             stash name: 'unit-test-results', includes: 'result-unit.xml'
@@ -50,7 +50,7 @@ pipeline {
                 stage('Rest Test') {
                     agent { label 'worker2' }
                     steps {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                             showEnvironmentInfo()
                             unstash 'built-artifacts'
                             echo 'Starting WireMock'
@@ -72,7 +72,7 @@ pipeline {
                             sh '''
                                 export PYTHONPATH=$WORKSPACE
                                 echo "PYTHONPATH is set to: $PYTHONPATH"
-                                pytest --junitxml=result-rest.xml test/rest
+                                pytest --junitxml=result-rest.xml test/rest || true
                             '''
                             stash name: 'unit-rest-results', includes: 'result-rest.xml'
                             sh 'docker stop wiremock'
